@@ -1,0 +1,52 @@
+[project]
+name = "featuremanifolds"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.10.3",
+    "numpy>=2.3.2",
+    "ruff>=0.12.5",
+    "torch>=2.7.1",
+    "transformers>=4.54.0",
+]
+
+[tool.ruff]
+# Enable common linting rules
+select = [
+    "E",    # pycodestyle errors
+    "F",    # Pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort (import sorting)
+    "N",    # pep8-naming
+    "UP",   # pyupgrade (modern Python syntax)
+]
+
+# Ignore specific rules if needed
+ignore = []
+
+# Line length (matches Black's default)
+line-length = 88
+
+# Directories to exclude from linting
+exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+    "build",
+    "dist",
+]
+
+# Assume Python 3.12+ (matches your requires-python)
+target-version = "py312"
+
+[tool.ruff.format]
+# Formatting options
+quote-style = "double"           # Use double quotes
+indent-style = "space"           # Use spaces, not tabs
+line-ending = "auto"             # Auto-detect line endings
+
+[tool.ruff.lint.isort]
+# Import sorting configuration
+known-first-party = ["featuremanifolds"]  # Your package name
