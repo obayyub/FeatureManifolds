@@ -16,10 +16,15 @@ dependencies = [
     "sae-lens>=6.3.1",
     "scikit-learn>=1.7.1",
     "torch>=2.7.1",
+    "tqdm>=4.67.1",
     "transformer-lens>=2.15.4",
     "transformers>=4.54.0",
     "umap-learn>=0.5.9.post2",
 ]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 
 [tool.ruff]
 # Enable common linting rules
