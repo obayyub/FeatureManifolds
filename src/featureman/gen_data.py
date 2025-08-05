@@ -3,6 +3,65 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 
+# Import DEVICE if defined in another file, or define it here
+DEVICE = torch.device(
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+)
+
+
+def generate_hidden_data(
+    dim=128,
+    n_features=512,
+    n_samples=(2**14),
+    sparsity=10,
+    importance_base=1.0,
+    noise_scale=0.0,
+    seed=None,
+):
+    """Generate synthetic hidden data with sparse overcomplete basis.
+    Args:
+        dim (int): Dimensionality of the hidden data.
+        n_features (int): Number of features in the overcomplete basis.
+        n_samples (int): Number of samples to generate.
+        sparsity (int): Number of active features per sample.
+        importance_base (float): Base for exponential decay.
+        noise_scale (float): Scale for noise added to the data.
+        seed (int, optional): Random seed for reproducibility.
+    """
+
+    if seed is not None:
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+    # generate random normalized features
+    features = np.random.randn(n_features, dim)
+    features = features / np.linalg.norm(features, axis=1, keepdims=True)
+
+    # init sparsity weights
+    weights = np.zeros((n_samples, n_features))
+
+    feature_importance = importance_base ** np.arange(n_features)
+
+    # generate sparsity weights
+    for i in range(n_samples):
+        active_feats = np.random.choice(n_features, size=sparsity, replace=False)
+        weights[i, active_feats] = feature_importance[active_feats]
+
+    # make hidden data via sum of sparse features
+    hidden_data = weights @ features
+
+    # add noise
+    if noise_scale > 0:
+        noise = np.random.normal(0, noise_scale, hidden_data.shape)
+        hidden_data += noise
+
+    # Convert to tensor and move to device
+    return torch.tensor(hidden_data, dtype=torch.float32, device=DEVICE), features
+
 
 class ModularArithmeticDataset(Dataset):
     def __init__(self, p=113, n_samples=1000, operation="add"):
@@ -40,7 +99,9 @@ class OneLayerTransformer(nn.Module):
 
         self.unembed = nn.Linear(d_model, p)
 
-    def forward(self, x, return_activations=False):
+    def forward(
+        self, x, return_activations=False, inject_recon_acts=False, recon_acts=None
+    ):
         # xshape: (batch_size, seq_len)
         resid = self.embedding(x) + self.pos_emb[:, : x.shape[1], :]
 
@@ -48,7 +109,10 @@ class OneLayerTransformer(nn.Module):
         resid = resid + attn_out
 
         mlp_pre = self.mlp[0](resid)
-        mlp_act = self.mlp[1](mlp_pre)
+        if inject_recon_acts:
+            mlp_act = recon_acts
+        else:
+            mlp_act = self.mlp[1](mlp_pre)
         mlp_out = self.mlp[2](mlp_act)
         resid = mlp_out + resid
 
@@ -59,7 +123,7 @@ class OneLayerTransformer(nn.Module):
         return logits
 
 
-class BatchedSAE(nn.Module):
+class BatchedSAE_Updated(nn.Module):
     """
     This is a modified version of BatchedSAE that uses a different initialization method.
     Link to the updates to SAE: https://transformer-circuits.pub/2024/april-update/index.html#training-saes
@@ -79,7 +143,7 @@ class BatchedSAE(nn.Module):
         self.sae_hidden = input_dim * width_ratio
 
         # Initialize W_d with random directions and fixed L2 norm
-        W_d_init = torch.randn(n_models, self.sae_hidden, input_dim)
+        W_d_init = torch.randn(n_models, self.sae_hidden, input_dim, device=DEVICE)
         # Normalize columns to have L2 norm of 0.1
         W_d_init = 0.1 * W_d_init / W_d_init.norm(p=2, dim=2, keepdim=True)
 
@@ -90,14 +154,28 @@ class BatchedSAE(nn.Module):
         self.W_e = nn.Parameter(W_e_init)
 
         # Shape: [n_models, sae_hidden]
-        self.b_e = nn.Parameter(torch.zeros(n_models, self.sae_hidden))
+        self.b_e = nn.Parameter(torch.zeros(n_models, self.sae_hidden, device=DEVICE))
 
         # Shape: [n_models, sae_hidden, input_dim]
         self.W_d = nn.Parameter(W_d_init)
 
         # Shape: [n_models, input_dim]
-        self.b_d = nn.Parameter(torch.zeros(n_models, input_dim))
+        self.b_d = nn.Parameter(torch.zeros(n_models, input_dim, device=DEVICE))
         self.nonlinearity = activation
+
+    def _get_current_l1_lams(self, l1_lam_targets, epoch, n_epochs):
+        warmup_epochs = int(0.05 * n_epochs)  # 5% warmup
+        if epoch < warmup_epochs:
+            return l1_lam_targets * (epoch / warmup_epochs)
+        return l1_lam_targets
+
+    def _get_lr(self, epoch, n_epochs, base_lr=5e-5):
+        decay_start = int(0.8 * n_epochs)  # 80% of epochs
+        if epoch < decay_start:
+            return base_lr
+        else:
+            decay_factor = (epoch - decay_start) / (n_epochs - decay_start)
+            return base_lr * (1 - decay_factor)
 
     def forward(self, x):
         # x shape is already: [n_models, batch_size, input_dim]
@@ -112,7 +190,8 @@ class BatchedSAE(nn.Module):
         # Calculate L1 regularization weighted by decoder norm for each feature
         # [n_models, batch_size, sae_hidden] * [n_models, sae_hidden, 1] -> [n_models]
         decoder_norms = self.W_d.norm(p=2, dim=2)  # [n_models, sae_hidden]
-        l1_regularization = (acts.abs() * decoder_norms.unsqueeze(1)).sum(
+        # average over batch, then sum over features
+        l1_regularization = (acts.abs() * decoder_norms.unsqueeze(1)).mean(
             dim=[1, 2]
         )  # [n_models]
 
@@ -124,14 +203,14 @@ class BatchedSAE(nn.Module):
             1
         )  # [n_models, batch_size, input_dim]
 
-        return l0, l1_regularization, reconstruction
+        return l0, l1_regularization, acts, reconstruction
 
-    def train(
+    def fit(
         self,
         train_data,
         test_data,
-        batch_size=128,
-        n_epochs=10000,
+        batch_size=64,
+        n_epochs=500,
         l1_lam=3e-5,
         weight_decay=1e-4,
         output_epoch=False,
@@ -160,24 +239,21 @@ class BatchedSAE(nn.Module):
         # Initialize tracking variables
         optimizer = torch.optim.Adam(self.parameters(), lr=5e-5)
 
-        # Initialize early stopping trackers for each model
-        best_losses = torch.full(
-            (self.n_models,), float("inf"), device=train_data.device
-        )
-        patience_counters = torch.zeros(self.n_models, dtype=torch.int)
-        active_models = torch.ones(
-            self.n_models, dtype=torch.bool, device=train_data.device
-        )
-
         for epoch in range(n_epochs):
-            # Skip iteration if all models have converged
-            if not active_models.any():
-                break
-
             indices = torch.randperm(n_samples)
             total_mse_loss = torch.zeros(self.n_models, device=train_data.device)
             total_l1_loss = torch.zeros(self.n_models, device=train_data.device)
             total_l0 = torch.zeros(self.n_models, device=train_data.device)
+
+            # l1 lam warm up based on epoch
+            current_l1_lam = self._get_current_l1_lams(
+                l1_lam, epoch, n_epochs
+            )  # [n_models]
+
+            # Adjust learning rate
+            lr = self._get_lr(epoch, n_epochs)
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr
 
             # Process batches
             for i in range(0, n_samples, batch_size):
@@ -185,18 +261,20 @@ class BatchedSAE(nn.Module):
                 batch = train_data[:, batch_indices]  # Select samples for all models
 
                 optimizer.zero_grad()
-                l0, l1, recon_hiddens = self(batch)
+                l0, l1, _, recon_hiddens = self(batch)
 
                 # Calculate loss for each model separately - simplified
                 recon_loss = nn.MSELoss(reduction="none")(recon_hiddens, batch).mean(
                     dim=[1, 2]
                 )  # [n_models]
 
-                sparsity_loss = l1_lam * l1
-                loss = recon_loss + sparsity_loss
+                sparsity_loss = current_l1_lam * l1
+                loss = recon_loss + sparsity_loss  # [n_models]
 
                 # Sum losses across all models for backward
                 loss.sum().backward()
+                # Clip gradients to prevent explosion
+                # torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                 optimizer.step()
 
                 total_mse_loss += recon_loss.detach()
@@ -206,33 +284,17 @@ class BatchedSAE(nn.Module):
             # Early stopping check for each model
             avg_loss = total_mse_loss / n_batches
 
-            for m in range(self.n_models):
-                if not active_models[m]:
-                    continue
-
-                if avg_loss[m] < best_losses[m] - min_improvement:
-                    best_losses[m] = avg_loss[m]
-                    patience_counters[m] = 0
-                else:
-                    patience_counters[m] += 1
-                    if patience_counters[m] >= patience:
-                        active_models[m] = False
-                        if output_epoch:
-                            print(
-                                f"Model {m} converged at epoch {epoch} with loss {best_losses[m]:.4f}"
-                            )
-
-            if (epoch % 10 == 0) and output_epoch:
+            if epoch % 10 == 0:
                 avg_l1_loss = total_l1_loss / n_batches
                 avg_l0 = total_l0 / n_batches
 
                 for m in range(self.n_models):
-                    if active_models[m]:
-                        print(
-                            f"Model {m}, Epoch {epoch}, Loss: {avg_loss[m]:.4f}, "
-                            f"L1: {avg_l1_loss[m]:.4f}, "
-                            f"L0: {avg_l0[m]:.4f}"
-                        )
+                    print(
+                        f"Model {m}, Epoch {epoch}, Loss: {avg_loss[m]:.4f}, "
+                        f"MSE: {total_mse_loss[m].item() / n_batches:.4f}, "
+                        f"L1: {avg_l1_loss[m]:.4f}, "
+                        f"L0: {avg_l0[m]:.4f}"
+                    )
 
         return [
             {
@@ -244,3 +306,43 @@ class BatchedSAE(nn.Module):
             }
             for m in range(self.n_models)
         ]
+
+
+# Example of how to load a model and its features
+def load_model_and_features(model_path):
+    # Load the saved dictionary
+    saved_data = torch.load(model_path)
+
+    # Get the model class
+    model_class_name = saved_data["model_class"]
+    model_classes = {
+        # "BatchedSAE": BatchedSAE,
+        "BatchedSAE_Updated": BatchedSAE_Updated,
+    }
+    if model_class_name in model_classes:
+        model_class = model_classes[model_class_name]
+    else:
+        raise ValueError(f"Model class {model_class_name} not found")
+
+    # Create a new batched model with the same parameters
+    batched_model = model_class(
+        input_dim=saved_data["hidden_dim"],
+        n_models=1,  # We only need one model when loading
+        width_ratio=saved_data["width_factor"],
+    )
+
+    # Extract the specific model's weights from the state dict
+    model_index = saved_data["model_index"]
+    full_state_dict = saved_data["model_state_dict"]
+
+    # Create a new state dict with just the weights for the model we want
+    single_model_state_dict = {}
+    for k, v in full_state_dict.items():
+        if k in ["W_e", "b_e", "W_d", "b_d"]:
+            # Extract just this model's parameters
+            single_model_state_dict[k] = v[model_index : model_index + 1]
+
+    # Load the state dict
+    batched_model.load_state_dict(single_model_state_dict)
+
+    return batched_model, saved_data["features"], saved_data
