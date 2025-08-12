@@ -237,7 +237,7 @@ class BatchedSAE_Updated(nn.Module):
         n_batches = n_samples // batch_size
 
         # Initialize tracking variables
-        optimizer = torch.optim.Adam(self.parameters(), lr=5e-5)
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-5)
 
         for epoch in range(n_epochs):
             indices = torch.randperm(n_samples)
