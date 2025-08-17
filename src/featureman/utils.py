@@ -131,3 +131,4 @@ def plot_pca_fourier_components(output_pca, max_freq=56, plot=True):
         top_frequencies[i] = component_frequencies[:3]
 
     return top_frequencies
+
