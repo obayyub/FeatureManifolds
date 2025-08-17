@@ -15,6 +15,7 @@ dependencies = [
     "ruff>=0.12.5",
     "sae-lens>=6.3.1",
     "scikit-learn>=1.7.1",
+    "seaborn>=0.13.2",
     "torch>=2.7.1",
     "tqdm>=4.67.1",
     "transformer-lens>=2.15.4",
