@@ -123,6 +123,61 @@ class OneLayerTransformer(nn.Module):
         return logits
 
 
+class MultiLayerTransformer(nn.Module):
+    def __init__(self, p=113, d_model=128, nheads=4, n_layers=2, embedding=None):
+        super().__init__()
+        vocab_size = p + 3  # 0 to p-1, +, =, pad
+
+        if embedding is None:
+            self.embedding = nn.Embedding(vocab_size, d_model)
+        else:
+            self.embedding = embedding
+
+        self.pos_emb = nn.Parameter(torch.randn(1, 10, d_model) * 0.01)
+
+        self.layers = nn.ModuleList()
+        for _ in range(n_layers):
+            layer = nn.ModuleDict(
+                {
+                    "attn": nn.MultiheadAttention(d_model, nheads, batch_first=True),
+                    "mlp": nn.Sequential(
+                        nn.Linear(d_model, 4 * d_model),
+                        nn.ReLU(),
+                        nn.Linear(4 * d_model, d_model),
+                    ),
+                }
+            )
+            self.layers.append(layer)
+
+        self.unembed = nn.Linear(d_model, p)
+
+    def forward(
+        self, x, return_activations=False, inject_recon_acts=False, recon_acts=None
+    ):
+        # xshape: (batch_size, seq_len)
+        resid = self.embedding(x) + self.pos_emb[:, : x.shape[1], :]
+
+        mlp_acts = []
+        for layer in self.layers:
+            attn_out, _ = layer["attn"](resid, resid, resid)
+            resid = resid + attn_out
+
+            mlp_pre = layer["mlp"][0](resid)
+            if inject_recon_acts and recon_acts is not None:
+                mlp_act = recon_acts
+            else:
+                mlp_act = layer["mlp"][1](mlp_pre)
+            mlp_out = layer["mlp"][2](mlp_act)
+            resid = mlp_out + resid
+            mlp_acts.append(mlp_act)
+
+        logits = self.unembed(resid[:, -1, :])
+
+        if return_activations:
+            return logits, mlp_acts
+        return logits
+
+
 class BatchedSAE_Updated(nn.Module):
     """
     This is a modified version of BatchedSAE that uses a different initialization method.
