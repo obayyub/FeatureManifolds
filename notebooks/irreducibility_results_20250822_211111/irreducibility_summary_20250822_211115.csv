@@ -1,0 +1,2 @@
+cluster_idx,mean_separability,mean_mixture,best_separability,best_mixture,best_projection,pc1_variance,pc2_variance,pc3_variance,is_irreducible,irreducibility_score
+1,0.8012063898404042,0.33358922573625455,0.965439674608477,0.33534686088038784,PC2-PC5,0.1935967355966568,0.18668977916240692,0.1782490760087967,True,0.5339325705986041
