@@ -124,7 +124,9 @@ class OneLayerTransformer(nn.Module):
 
 
 class MultiLayerTransformer(nn.Module):
-    def __init__(self, p=113, d_model=128, nheads=4, n_layers=2, embedding=None):
+    def __init__(
+        self, p=113, d_model=128, width_ratio=4, nheads=4, n_layers=2, embedding=None
+    ):
         super().__init__()
         vocab_size = p + 3  # 0 to p-1, +, =, pad
 
@@ -141,9 +143,9 @@ class MultiLayerTransformer(nn.Module):
                 {
                     "attn": nn.MultiheadAttention(d_model, nheads, batch_first=True),
                     "mlp": nn.Sequential(
-                        nn.Linear(d_model, 4 * d_model),
+                        nn.Linear(d_model, width_ratio * d_model),
                         nn.ReLU(),
-                        nn.Linear(4 * d_model, d_model),
+                        nn.Linear(width_ratio * d_model, d_model),
                     ),
                 }
             )
